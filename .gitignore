@@ -1,1 +1,3 @@
 .env
+# 「node_modules」という名前のフォルダとその中身をすべて除外
+node_modules/
