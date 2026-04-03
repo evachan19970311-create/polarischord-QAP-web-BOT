@@ -179,9 +179,45 @@ async function handleQapCommand_(interaction) {
       throw new Error(response.data.error || "GAS側でエラーが発生しました");
     }
 
-    await interaction.editReply(
-      `✅スプレッドシートが更新されました\n日付: ${dateInput}\n曲名: ${song.name}\n難易度: ${diff}`
-    );
+    await interaction.editReply({
+      embeds: [
+        {
+          title: "✅ QAPデータ登録完了",
+          description: "スプレッドシートを更新しました。",
+          fields: [
+            {
+              name: "日付",
+              value: dateInput,
+              inline: true,
+            },
+            {
+              name: "曲名",
+              value: song.name,
+              inline: true,
+            },
+            {
+              name: "難易度",
+              value: diff,
+              inline: true,
+            },
+            {
+              name: "プレイヤー",
+              value: [
+                payload.name1,
+                payload.name2,
+                payload.name3,
+                payload.name4,
+              ].join("\n"),
+              inline: false,
+            },
+          ],
+          footer: {
+            text: "PolarisChord QAP Web",
+          },
+          timestamp: new Date().toISOString(),
+        },
+      ],
+    });
   } catch (error) {
     console.error("qap post error:", error?.response?.data || error);
     await interaction.editReply("登録中にエラーが発生しました。入力値またはGASログを確認してください。");
