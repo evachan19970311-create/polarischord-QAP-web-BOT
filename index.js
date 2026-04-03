@@ -133,7 +133,7 @@ async function handleAutocomplete_(interaction) {
 }
 
 async function handleQapCommand_(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply();
 
   const musicId = getRequiredOption_(interaction, "song");
   const diff = getRequiredOption_(interaction, "diff");
