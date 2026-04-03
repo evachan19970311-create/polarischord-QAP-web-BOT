@@ -180,7 +180,7 @@ async function handleQapCommand_(interaction) {
     }
 
     await interaction.editReply(
-      `登録完了\n曲名: ${song.name}\n難易度: ${diff}\n日付: ${dateInput}`
+      `✅スプレッドシートが更新されました\n日付: ${dateInput}\n曲名: ${song.name}\n難易度: ${diff}`
     );
   } catch (error) {
     console.error("qap post error:", error?.response?.data || error);
