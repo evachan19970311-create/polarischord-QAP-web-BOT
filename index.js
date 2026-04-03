@@ -1,11 +1,8 @@
 const { Client, GatewayIntentBits, Events } = require("discord.js");
 const axios = require("axios");
 
-require('dotenv').config(); // .envファイルから環境変数を読み込む
+require("dotenv").config();
 
-// =======================
-// 設定
-// =======================
 const CONFIG = {
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
   GAS_URL: process.env.GAS_URL,
@@ -15,27 +12,18 @@ const CONFIG = {
 
 validateConfig_(CONFIG);
 
-// =======================
-// HTTPクライアント
-// =======================
 const gasClient = axios.create({
   baseURL: CONFIG.GAS_URL,
-  timeout: 10000,
+  timeout: 15000,
   headers: {
     "Content-Type": "application/json",
   },
 });
 
-// =======================
-// Discordクライアント
-// =======================
 const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
 
-// =======================
-// 楽曲キャッシュ
-// =======================
 const songStore = {
   items: [],
   loadedAt: 0,
@@ -72,15 +60,15 @@ async function fetchSongs_() {
     throw new Error(response.data.error || "GAS側で楽曲一覧取得エラーが発生しました");
   }
 
-  const songs_data = Array.isArray(response.data)
+  const songsData = Array.isArray(response.data)
     ? response.data
     : response.data?.data;
 
-  if (!Array.isArray(songs_data)) {
+  if (!Array.isArray(songsData)) {
     throw new Error("楽曲一覧のレスポンス形式が不正です");
   }
 
-  return songs_data.map((song) => ({
+  return songsData.map((song) => ({
     id: String(song.music_id),
     name: String(song.music_title),
     searchKey: normalizeText_(song.music_title),
@@ -116,6 +104,39 @@ function getOptionalOption_(interaction, name) {
   return value ? String(value).trim() : "";
 }
 
+function buildErrorMessage_(error) {
+  if (error?.response?.data?.error) {
+    return `登録中にエラーが発生しました: ${error.response.data.error}`;
+  }
+
+  if (error?.code === "ECONNABORTED") {
+    return "登録中にタイムアウトしました。GASの実行時間または応答を確認してください。";
+  }
+
+  if (error?.message) {
+    return `登録中にエラーが発生しました: ${error.message}`;
+  }
+
+  return "登録中にエラーが発生しました。入力値またはGASログを確認してください。";
+}
+
+async function safeEditReply_(interaction, payload) {
+  try {
+    return await interaction.editReply(payload);
+  } catch (error) {
+    console.error("editReply error:", error);
+    try {
+      return await interaction.followUp(
+        typeof payload === "string"
+          ? { content: payload }
+          : { content: "処理は完了しましたが、返信の更新に失敗したため追送しています。" }
+      );
+    } catch (followError) {
+      console.error("followUp error:", followError);
+    }
+  }
+}
+
 async function handleAutocomplete_(interaction) {
   if (interaction.commandName !== "qap") return;
 
@@ -127,7 +148,7 @@ async function handleAutocomplete_(interaction) {
       .filter((song) => song.searchKey.includes(focused))
       .slice(0, 25)
       .map((song) => ({
-        name: song.name.length > 100 ? song.name.slice(0, 97) + "..." : song.name,
+        name: song.name.length > 100 ? song.name.slice(0, 97) + "." : song.name,
         value: song.id,
       }));
 
@@ -143,24 +164,27 @@ async function handleAutocomplete_(interaction) {
 async function handleQapCommand_(interaction) {
   await interaction.deferReply();
 
+  console.log("qap start");
+
   const musicId = getRequiredOption_(interaction, "song");
   const diff = getRequiredOption_(interaction, "diff");
   const dateInput = getRequiredOption_(interaction, "date");
 
   validateDateFormat_(dateInput);
 
+  console.log("qap validate ok");
+
   await ensureSongsLoaded_();
 
   let song = songStore.items.find((item) => item.id === musicId);
 
-  // キャッシュずれ対策
   if (!song) {
     await ensureSongsLoaded_(true);
     song = songStore.items.find((item) => item.id === musicId);
   }
 
   if (!song) {
-    await interaction.editReply("楽曲が見つかりません。楽曲マスタを更新してから再試行してください。");
+    await safeEditReply_(interaction, "楽曲が見つかりません。楽曲マスタを更新してから再試行してください。");
     return;
   }
 
@@ -180,14 +204,23 @@ async function handleQapCommand_(interaction) {
     crewid4: getOptionalOption_(interaction, "crewid4"),
   };
 
+  console.log("qap payload ready:", {
+    music_id: payload.music_id,
+    music_title: payload.music_title,
+    diff: payload.diff,
+    date_input: payload.date_input,
+  });
+
   try {
+    console.log("qap post start");
     const response = await gasClient.post("", payload);
+    console.log("qap post success:", response.data);
 
     if (response.data && response.data.ok === false) {
       throw new Error(response.data.error || "GAS側でエラーが発生しました");
     }
 
-    await interaction.editReply({
+    await safeEditReply_(interaction, {
       embeds: [
         {
           title: "✅ QAPデータ登録完了",
@@ -227,8 +260,14 @@ async function handleQapCommand_(interaction) {
       ],
     });
   } catch (error) {
-    console.error("qap post error:", error?.response?.data || error);
-    await interaction.editReply("登録中にエラーが発生しました。入力値またはGASログを確認してください。");
+    console.error("qap post error:", {
+      message: error?.message,
+      code: error?.code,
+      response_status: error?.response?.status,
+      response_data: error?.response?.data,
+    });
+
+    await safeEditReply_(interaction, buildErrorMessage_(error));
   }
 }
 
