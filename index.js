@@ -223,8 +223,8 @@ async function handleQapCommand_(interaction) {
     await safeEditReply_(interaction, {
       embeds: [
         {
-          title: "✅ QAPデータ登録完了",
-          description: "スプレッドシートを更新しました。",
+          title: '✅ QAPデータ更新完了',
+          color: 0x5865F2,
           fields: [
             {
               name: "日付",
@@ -244,10 +244,10 @@ async function handleQapCommand_(interaction) {
             {
               name: "プレイヤー",
               value: [
-                payload.name1,
-                payload.name2,
-                payload.name3,
-                payload.name4,
+                `・${payload.name1} `,
+                `・${payload.name2} `,
+                `・${payload.name3} `,
+                `・${payload.name4} `,
               ].join("\n"),
               inline: false,
             },
@@ -255,9 +255,9 @@ async function handleQapCommand_(interaction) {
           footer: {
             text: "PolarisChord QAP Web",
           },
-          timestamp: new Date().toISOString(),
-        },
-      ],
+          timestamp: new Date().toISOString()
+        }
+      ]
     });
   } catch (error) {
     console.error("qap post error:", {
