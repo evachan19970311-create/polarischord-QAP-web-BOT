@@ -68,11 +68,19 @@ async function fetchSongs_() {
     },
   });
 
-  if (!Array.isArray(response.data)) {
+  if (response.data && response.data.ok === false) {
+    throw new Error(response.data.error || "GAS側で楽曲一覧取得エラーが発生しました");
+  }
+
+  const songs_data = Array.isArray(response.data)
+    ? response.data
+    : response.data?.data;
+
+  if (!Array.isArray(songs_data)) {
     throw new Error("楽曲一覧のレスポンス形式が不正です");
   }
 
-  return response.data.map((song) => ({
+  return songs_data.map((song) => ({
     id: String(song.music_id),
     name: String(song.music_title),
     searchKey: normalizeText_(song.music_title),
