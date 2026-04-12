@@ -366,30 +366,6 @@ function buildQapErrorEmbed(payload) {
     .setTimestamp(new Date());
 }
 
-function buildQapSummaryEmbed(payload) {
-  const results = toArray(payload.results);
-  const lines = results.map((item) => {
-    const label = String(item && item.label || "-");
-    const status = String(item && item.status || (item && item.success ? "success" : "unknown"));
-    const changed = item && typeof item.changed === "boolean" ? (item.changed ? "changed" : "no_change") : "-";
-    const fileName = String(item && item.file_name || "-");
-    return `・${label} | ${status} | ${changed} | ${fileName}`;
-  });
-
-  const hasError = results.some((item) => item && item.success === false) || Boolean(payload.error_message);
-
-  return new EmbedBuilder()
-    .setTitle(hasError ? "⚠️ QAP summary_data 更新エラー" : "📦 QAP summary_data 更新結果")
-    .setColor(hasError ? 0xed4245 : 0x5865f2)
-    .addFields(
-      { name: "結果", value: splitLinesToFieldValue(lines), inline: false },
-      { name: "エラー", value: String(payload.error_message || "-"), inline: false },
-      { name: "実行時刻", value: String(payload.executed_at || nowIso()), inline: false },
-    )
-    .setFooter(buildFooter("PolarisChord QAP Summary Updater"))
-    .setTimestamp(new Date());
-}
-
 function buildGenericEmbed(payload) {
   return new EmbedBuilder()
     .setTitle("🔔 通知")
