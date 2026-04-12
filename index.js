@@ -254,6 +254,34 @@ function buildScoreApdiffEmbed(payload) {
     .setTimestamp(new Date());
 }
 
+function buildQapSaveEmbed(payload) {
+  const record = payload.record || {};
+  const members = toArray(record.members).map((member) => {
+    const name = String(member && member.name || "-").trim() || "-";
+    const crewid = String(member && member.crewid || "-").trim() || "-";
+    return `・${name} / ${crewid}`;
+  });
+
+  return new EmbedBuilder()
+    .setTitle("✅ QAPデータ登録完了")
+    .setColor(0x57f287)
+    .addFields(
+      { name: "日付", value: String(record.display_date || "-"), inline: true },
+      { name: "曲名", value: String(record.music_title || "-"), inline: true },
+      { name: "難易度", value: String(record.diff || "-").toUpperCase(), inline: true },
+      { name: "プレイヤー", value: splitLinesToFieldValue(members), inline: false },
+      {
+        name: "GitHub",
+        value:
+          "qap_data: " + (payload.qap_data_commit_sha ? String(payload.qap_data_commit_sha).slice(0, 7) : "-") + "\n" +
+          "summary: " + (payload.qap_summary_commit_sha ? String(payload.qap_summary_commit_sha).slice(0, 7) : "-"),
+        inline: false,
+      },
+    )
+    .setFooter(buildFooter("PolarisChord QAP Web"))
+    .setTimestamp(new Date());
+}
+
 function buildQapSummaryEmbed(payload) {
   const results = Array.isArray(payload.results) ? payload.results : [];
   const changedItems = Array.isArray(payload.changed_items) ? payload.changed_items : [];
