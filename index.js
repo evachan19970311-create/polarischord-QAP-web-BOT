@@ -254,30 +254,37 @@ function buildScoreApdiffEmbed(payload) {
     .setTimestamp(new Date());
 }
 
-function buildQapSaveEmbed(payload) {
-  const members = toArray(payload.record && payload.record.members).map((member) => {
-    const name = String(member && member.name || "-").trim() || "-";
-    const crewid = String(member && member.crewid || "-").trim() || "-";
-    return `・${name} / ${crewid}`;
-  });
+function buildQapSummaryEmbed(payload) {
+  const results = Array.isArray(payload.results) ? payload.results : [];
+  const changedItems = Array.isArray(payload.changed_items) ? payload.changed_items : [];
+
+  const hasError =
+    results.some((item) => item && item.success === false) ||
+    Boolean(payload.error_message);
+
+  const resultText = results.length
+    ? results
+        .map((item) => {
+          const status = String(item && item.status || '-');
+          return status;
+        })
+        .join('\n')
+    : '-';
+
+  const changedText = changedItems.length
+    ? changedItems.map((item) => '・' + String(item)).join('\n')
+    : '-';
 
   return new EmbedBuilder()
-    .setTitle("✅ QAPデータ登録完了")
-    .setColor(0x57f287)
+    .setTitle(hasError ? '⚠️ QAP summary_data 更新エラー' : '📦 QAP summary_data 更新結果')
+    .setColor(hasError ? 0xed4245 : 0x5865f2)
     .addFields(
-      { name: "日付", value: String(payload.record && payload.record.display_date || "-"), inline: true },
-      { name: "曲名", value: String(payload.record && payload.record.music_title || "-"), inline: true },
-      { name: "難易度", value: String(payload.record && payload.record.diff || "-").toUpperCase(), inline: true },
-      { name: "プレイヤー", value: splitLinesToFieldValue(members), inline: false },
-      {
-        name: "GitHub",
-        value:
-          "qap_data: " + (payload.qap_data_commit_sha ? String(payload.qap_data_commit_sha).slice(0, 7) : "-") + "\n" +
-          "summary: " + (payload.qap_summary_commit_sha ? String(payload.qap_summary_commit_sha).slice(0, 7) : "-"),
-        inline: false,
-      },
+      { name: '結果', value: resultText, inline: false },
+      { name: 'エラー', value: String(payload.error_message || '-'), inline: false },
+      { name: '更新内容', value: changedText, inline: false },
+      { name: '実行時刻', value: String(payload.executed_at || '-'), inline: false }
     )
-    .setFooter(buildFooter("PolarisChord QAP Web"))
+    .setFooter(buildFooter('PolarisChord QAP Summary Updater'))
     .setTimestamp(new Date());
 }
 
