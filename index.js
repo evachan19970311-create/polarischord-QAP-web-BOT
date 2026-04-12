@@ -1,321 +1,590 @@
-const { Client, GatewayIntentBits, Events } = require("discord.js");
-const axios = require("axios");
+"use strict";
 
-require("dotenv").config();
+const express = require("express");
+const crypto = require("crypto");
+const {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  REST,
+  Routes,
+} = require("discord.js");
 
-const CONFIG = {
-  DISCORD_TOKEN: process.env.DISCORD_TOKEN,
-  GAS_URL: process.env.GAS_URL,
-  GAS_SHARED_SECRET: process.env.GAS_SHARED_SECRET,
-  SONG_CACHE_TTL_MS: Number(process.env.SONG_CACHE_TTL_MS || 10 * 60 * 1000),
-};
+/* =========================================================
+ * 基本設定
+ * ========================================================= */
 
-validateConfig_(CONFIG);
+const {
+  DISCORD_BOT_TOKEN,
+  DISCORD_CLIENT_ID,
+  DISCORD_NOTIFY_API_TOKEN,
+  PORT = "3000",
 
-const gasClient = axios.create({
-  baseURL: CONFIG.GAS_URL,
-  timeout: 15000,
-  headers: {
-    "Content-Type": "application/json",
-  },
-});
+  // チャンネルID
+  DISCORD_CHANNEL_SCORE_LOG,
+  DISCORD_CHANNEL_QAP_LOG,
+  DISCORD_CHANNEL_ERROR_LOG,
+
+  // 任意: 個別に分けたい場合はこれらを使う
+  DISCORD_CHANNEL_SCORE_BOOKMARKLET,
+  DISCORD_CHANNEL_SCORE_MUSICDATA,
+  DISCORD_CHANNEL_SCORE_APDIFF,
+  DISCORD_CHANNEL_QAP_DOPST,
+  DISCORD_CHANNEL_QAP_SUMMARY,
+} = process.env;
+
+if (!DISCORD_BOT_TOKEN) {
+  throw new Error("DISCORD_BOT_TOKEN is required");
+}
+if (!DISCORD_NOTIFY_API_TOKEN) {
+  throw new Error("DISCORD_NOTIFY_API_TOKEN is required");
+}
+
+const app = express();
+app.use(express.json({ limit: "1mb" }));
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
 
-const songStore = {
-  items: [],
-  loadedAt: 0,
-};
+const queue = [];
+let is_sending = false;
 
-function validateConfig_(config) {
-  const requiredKeys = ["DISCORD_TOKEN", "GAS_URL", "GAS_SHARED_SECRET"];
-  const missing = requiredKeys.filter((key) => !config[key]);
+/* =========================================================
+ * ユーティリティ
+ * ========================================================= */
 
-  if (missing.length > 0) {
-    throw new Error(`環境変数不足: ${missing.join(", ")}`);
-  }
+function nowIso() {
+  return new Date().toISOString();
 }
 
-function normalizeText_(value) {
+function truncate(text, max = 1000) {
+  const value = String(text ?? "");
+  if (value.length <= max) return value;
+  return value.slice(0, max - 3) + "...";
+}
+
+function toArray(value) {
+  return Array.isArray(value) ? value : value == null ? [] : [value];
+}
+
+function maskToken(token) {
+  if (!token) return "-";
+  if (token.length <= 8) return "********";
+  return token.slice(0, 4) + "..." + token.slice(-4);
+}
+
+function verifyBearerToken(req) {
+  const auth = String(req.headers.authorization || "");
+  if (!auth.startsWith("Bearer ")) return false;
+  const token = auth.slice("Bearer ".length).trim();
+  return timingSafeEqual(token, DISCORD_NOTIFY_API_TOKEN);
+}
+
+function timingSafeEqual(a, b) {
+  const aa = Buffer.from(String(a || ""));
+  const bb = Buffer.from(String(b || ""));
+  if (aa.length !== bb.length) return false;
+  return crypto.timingSafeEqual(aa, bb);
+}
+
+function normalizeSource(value) {
   return String(value || "").trim().toLowerCase();
 }
 
-function validateDateFormat_(value) {
-  if (!/^\d{2}\/\d{2}\/\d{2}$/.test(String(value || "").trim())) {
-    throw new Error("date は YY/MM/DD 形式で入力してください");
-  }
+function normalizeEventType(value) {
+  return String(value || "").trim().toLowerCase();
 }
 
-async function fetchSongs_() {
-  const response = await gasClient.get("", {
-    params: {
-      type: "qapdata",
-      secret: CONFIG.GAS_SHARED_SECRET,
-    },
-  });
-
-  if (response.data && response.data.ok === false) {
-    throw new Error(response.data.error || "GAS側で楽曲一覧取得エラーが発生しました");
-  }
-
-  const songsData = Array.isArray(response.data)
-    ? response.data
-    : response.data?.data;
-
-  if (!Array.isArray(songsData)) {
-    throw new Error("楽曲一覧のレスポンス形式が不正です");
-  }
-
-  return songsData.map((song) => ({
-    id: String(song.music_id),
-    name: String(song.music_title),
-    searchKey: normalizeText_(song.music_title),
-  }));
+function buildFooter(text) {
+  return { text: text || "PolarisChord Notification Bot" };
 }
 
-async function ensureSongsLoaded_(force = false) {
-  const now = Date.now();
-  const isExpired = now - songStore.loadedAt > CONFIG.SONG_CACHE_TTL_MS;
-
-  if (!force && songStore.items.length > 0 && !isExpired) {
-    return songStore.items;
-  }
-
-  const songs = await fetchSongs_();
-  songStore.items = songs;
-  songStore.loadedAt = now;
-
-  console.log(`楽曲読み込み完了: ${songs.length}`);
-  return songs;
+function splitLinesToFieldValue(lines, maxLength = 1000) {
+  const text = lines.filter(Boolean).join("\n");
+  return text ? truncate(text, maxLength) : "-";
 }
 
-function getRequiredOption_(interaction, name) {
-  const value = interaction.options.getString(name);
-  if (!value || !String(value).trim()) {
-    throw new Error(`${name} は必須です`);
-  }
-  return String(value).trim();
-}
-
-function getOptionalOption_(interaction, name) {
-  const value = interaction.options.getString(name);
-  return value ? String(value).trim() : "";
-}
-
-function buildErrorMessage_(error) {
-  if (error?.response?.data?.error) {
-    return `登録中にエラーが発生しました: ${error.response.data.error}`;
-  }
-
-  if (error?.code === "ECONNABORTED") {
-    return "登録中にタイムアウトしました。GASの実行時間または応答を確認してください。";
-  }
-
-  if (error?.message) {
-    return `登録中にエラーが発生しました: ${error.message}`;
-  }
-
-  return "登録中にエラーが発生しました。入力値またはGASログを確認してください。";
-}
-
-async function safeEditReply_(interaction, payload) {
+function safeJson(value) {
   try {
-    return await interaction.editReply(payload);
+    return JSON.stringify(value);
   } catch (error) {
-    console.error("editReply error:", error);
-    try {
-      return await interaction.followUp(
-        typeof payload === "string"
-          ? { content: payload }
-          : { content: "処理は完了しましたが、返信の更新に失敗したため追送しています。" }
-      );
-    } catch (followError) {
-      console.error("followUp error:", followError);
-    }
+    return String(value);
   }
 }
 
-async function handleAutocomplete_(interaction) {
-  if (interaction.commandName !== "qap") return;
+/* =========================================================
+ * チャンネル振り分け
+ * 3チャンネル構成を基本にしつつ、必要なら個別指定で上書き
+ * ========================================================= */
 
-  try {
-    await ensureSongsLoaded_();
-
-    const focused = normalizeText_(interaction.options.getFocused());
-    const filtered = songStore.items
-      .filter((song) => song.searchKey.includes(focused))
-      .slice(0, 25)
-      .map((song) => ({
-        name: song.name.length > 100 ? song.name.slice(0, 97) + "." : song.name,
-        value: song.id,
-      }));
-
-    await interaction.respond(filtered);
-  } catch (error) {
-    console.error("autocomplete error:", error);
-    if (!interaction.responded) {
-      await interaction.respond([]);
-    }
+function resolveChannelId(source, eventType, level) {
+  if (level === "error") {
+    return DISCORD_CHANNEL_ERROR_LOG || null;
   }
+
+  if (source === "score_tool") {
+    if (eventType === "bookmarklet") {
+      return DISCORD_CHANNEL_SCORE_BOOKMARKLET || DISCORD_CHANNEL_SCORE_LOG || null;
+    }
+    if (eventType === "music_data") {
+      return DISCORD_CHANNEL_SCORE_MUSICDATA || DISCORD_CHANNEL_SCORE_LOG || null;
+    }
+    if (eventType === "apdiff") {
+      return DISCORD_CHANNEL_SCORE_APDIFF || DISCORD_CHANNEL_SCORE_LOG || null;
+    }
+    return DISCORD_CHANNEL_SCORE_LOG || null;
+  }
+
+  if (source === "qap_site") {
+    if (eventType === "qap_summary_update") {
+      return DISCORD_CHANNEL_QAP_SUMMARY || DISCORD_CHANNEL_QAP_LOG || null;
+    }
+    if (
+      eventType === "qap_save" ||
+      eventType === "qap_update" ||
+      eventType === "qap_delete" ||
+      eventType === "qap_error"
+    ) {
+      return DISCORD_CHANNEL_QAP_DOPST || DISCORD_CHANNEL_QAP_LOG || null;
+    }
+    return DISCORD_CHANNEL_QAP_LOG || null;
+  }
+
+  return DISCORD_CHANNEL_ERROR_LOG || DISCORD_CHANNEL_SCORE_LOG || DISCORD_CHANNEL_QAP_LOG || null;
 }
 
-async function handleQapCommand_(interaction) {
-  await interaction.deferReply();
+/* =========================================================
+ * Embedビルダー
+ * ========================================================= */
 
-  console.log("qap start");
+function buildScoreBookmarkletEmbed(payload) {
+  const isInitial = Boolean(payload.is_initial);
+  const hasDiff = Boolean(payload.has_diff);
 
-  const musicId = getRequiredOption_(interaction, "song");
-  const diff = getRequiredOption_(interaction, "diff");
-  const dateInput = getRequiredOption_(interaction, "date");
+  const title = isInitial
+    ? "🆕 新規ユーザーデータ登録"
+    : hasDiff
+      ? "📈 スコア更新検知"
+      : "📝 スコア更新なし";
 
-  validateDateFormat_(dateInput);
+  const color = isInitial ? 0x3498db : hasDiff ? 0x2ecc71 : 0x95a5a6;
 
-  console.log("qap validate ok");
+  return new EmbedBuilder()
+    .setTitle(title)
+    .setColor(color)
+    .addFields(
+      { name: "プレイヤー", value: String(payload.player_name || "-"), inline: true },
+      { name: "Crew ID", value: String(payload.crew_id || "-"), inline: true },
+      { name: "楽曲数", value: String(payload.music_count ?? 0), inline: true },
+      { name: "差分", value: hasDiff ? "あり" : "なし", inline: true },
+      { name: "履歴保存", value: payload.history_path ? "あり" : "なし", inline: true },
+      { name: "履歴JSON", value: String(payload.history_path || "-"), inline: false },
+      { name: "summary JSON", value: String(payload.summary_path || "-"), inline: false },
+      { name: "時刻", value: String(payload.exported_at || "-"), inline: false },
+    )
+    .setFooter(buildFooter("PolarisChord ScoreTool"))
+    .setTimestamp(new Date());
+}
 
-  await ensureSongsLoaded_();
-
-  let song = songStore.items.find((item) => item.id === musicId);
-
-  if (!song) {
-    await ensureSongsLoaded_(true);
-    song = songStore.items.find((item) => item.id === musicId);
-  }
-
-  if (!song) {
-    await safeEditReply_(interaction, "楽曲が見つかりません。楽曲マスタを更新してから再試行してください。");
-    return;
-  }
-
-  const payload = {
-    secret: CONFIG.GAS_SHARED_SECRET,
-    music_id: song.id,
-    music_title: song.name,
-    diff,
-    date_input: dateInput,
-    name1: getRequiredOption_(interaction, "name1"),
-    name2: getRequiredOption_(interaction, "name2"),
-    name3: getRequiredOption_(interaction, "name3"),
-    name4: getRequiredOption_(interaction, "name4"),
-    crewid1: getOptionalOption_(interaction, "crewid1"),
-    crewid2: getOptionalOption_(interaction, "crewid2"),
-    crewid3: getOptionalOption_(interaction, "crewid3"),
-    crewid4: getOptionalOption_(interaction, "crewid4"),
+function buildScoreMusicDataEmbed(payload) {
+  const diffType = String(payload.diff_type || "unknown");
+  const titleMap = {
+    first_upload: "🆕 MusicData 初回作成",
+    updated: "📈 MusicData 更新あり",
+    no_diff: "📝 MusicData 更新なし",
+  };
+  const colorMap = {
+    first_upload: 0x3498db,
+    updated: 0x2ecc71,
+    no_diff: 0x95a5a6,
   };
 
-  console.log("qap payload ready:", {
-    music_id: payload.music_id,
-    music_title: payload.music_title,
-    diff: payload.diff,
-    date_input: payload.date_input,
+  const labels = toArray(payload.changed_song_labels)
+    .slice(0, 20)
+    .map((label) => "・" + String(label));
+
+  return new EmbedBuilder()
+    .setTitle(titleMap[diffType] || `📦 MusicData: ${diffType}`)
+    .setColor(colorMap[diffType] || 0x5865f2)
+    .addFields(
+      { name: "JSON", value: String(payload.output_path || "-"), inline: false },
+      { name: "History", value: String(payload.history_path || "-"), inline: false },
+      { name: "楽曲数", value: String(payload.song_count ?? 0), inline: true },
+      { name: "譜面数", value: String(payload.diff_count ?? 0), inline: true },
+      { name: "差分", value: payload.has_diff ? "あり" : "なし", inline: true },
+      { name: "追加 / 更新曲数", value: String(toArray(payload.changed_song_ids).length), inline: true },
+      { name: "追加 / 更新楽曲名(先頭20件)", value: splitLinesToFieldValue(labels), inline: false },
+      { name: "実行時刻", value: String(payload.executed_at || "-"), inline: false },
+    )
+    .setFooter(buildFooter("PolarisChord MusicData Updater"))
+    .setTimestamp(new Date());
+}
+
+function buildScoreApdiffEmbed(payload) {
+  const changedItems = toArray(payload.changed_items)
+    .slice(0, 20)
+    .map((item) => {
+      const title = String(item && item.title || "-");
+      const diffName = String(item && item.diff_name || "-");
+      const oldValue = item && item.old_value != null ? item.old_value : "-";
+      const newValue = item && item.new_value != null ? item.new_value : "-";
+      return `・${title} [${diffName}] : ${oldValue} → ${newValue}`;
+    });
+
+  const description = [
+    `**ver**`,
+    `・旧: ${payload.old_ver ?? "-"}`,
+    `・新: ${payload.new_ver ?? "-"}`,
+    ``,
+    `**差分件数**`,
+    `・追加: ${payload.added_count ?? 0}件`,
+    `・削除: ${payload.removed_count ?? 0}件`,
+    `・変更: ${payload.changed_count ?? 0}件`,
+    changedItems.length ? `` : null,
+    changedItems.length ? `**変更例（最大20件）**` : null,
+    changedItems.length ? changedItems.join("\n") : null,
+  ].filter(Boolean).join("\n");
+
+  return new EmbedBuilder()
+    .setTitle("AP難易度表 更新通知")
+    .setColor(0x58a6ff)
+    .setDescription(truncate(description, 4000))
+    .setFooter(buildFooter(`更新日時: ${payload.executed_at || nowIso()}`))
+    .setTimestamp(new Date());
+}
+
+function buildQapSaveEmbed(payload) {
+  const members = toArray(payload.record && payload.record.members).map((member) => {
+    const name = String(member && member.name || "-").trim() || "-";
+    const crewid = String(member && member.crewid || "-").trim() || "-";
+    return `・${name} / ${crewid}`;
   });
 
+  return new EmbedBuilder()
+    .setTitle("✅ QAPデータ登録完了")
+    .setColor(0x57f287)
+    .addFields(
+      { name: "日付", value: String(payload.record && payload.record.display_date || "-"), inline: true },
+      { name: "曲名", value: String(payload.record && payload.record.music_title || "-"), inline: true },
+      { name: "難易度", value: String(payload.record && payload.record.diff || "-").toUpperCase(), inline: true },
+      { name: "プレイヤー", value: splitLinesToFieldValue(members), inline: false },
+      {
+        name: "GitHub",
+        value:
+          "qap_data: " + (payload.qap_data_commit_sha ? String(payload.qap_data_commit_sha).slice(0, 7) : "-") + "\n" +
+          "summary: " + (payload.qap_summary_commit_sha ? String(payload.qap_summary_commit_sha).slice(0, 7) : "-"),
+        inline: false,
+      },
+    )
+    .setFooter(buildFooter("PolarisChord QAP Web"))
+    .setTimestamp(new Date());
+}
+
+function buildQapUpdateEmbed(payload) {
+  const beforeRecord = payload.before_record || {};
+  const afterRecord = payload.after_record || {};
+
+  return new EmbedBuilder()
+    .setTitle("✏️ QAPデータ編集完了")
+    .setColor(0xfee75c)
+    .addFields(
+      { name: "曲名", value: String(beforeRecord.music_title || "-"), inline: true },
+      { name: "難易度", value: String(beforeRecord.diff || "-").toUpperCase(), inline: true },
+      {
+        name: "日付",
+        value: `${beforeRecord.display_date || "-"} → ${afterRecord.display_date || "-"}`,
+        inline: false,
+      },
+    )
+    .setFooter(buildFooter("PolarisChord QAP Web"))
+    .setTimestamp(new Date());
+}
+
+function buildQapDeleteEmbed(payload) {
+  const record = payload.record || {};
+  const members = toArray(record.members).map((member) => {
+    const name = String(member && member.name || "-").trim() || "-";
+    const crewid = String(member && member.crewid || "-").trim() || "-";
+    return `・${name} / ${crewid}`;
+  });
+
+  return new EmbedBuilder()
+    .setTitle("🗑️ QAPデータ削除完了")
+    .setColor(0xed4245)
+    .addFields(
+      { name: "日付", value: String(record.display_date || "-"), inline: true },
+      { name: "曲名", value: String(record.music_title || "-"), inline: true },
+      { name: "難易度", value: String(record.diff || "-").toUpperCase(), inline: true },
+      { name: "プレイヤー", value: splitLinesToFieldValue(members), inline: false },
+      {
+        name: "GitHub",
+        value:
+          "qap_data: " + (payload.qap_data_commit_sha ? String(payload.qap_data_commit_sha).slice(0, 7) : "-") + "\n" +
+          "summary: " + (payload.qap_summary_commit_sha ? String(payload.qap_summary_commit_sha).slice(0, 7) : "-"),
+        inline: false,
+      },
+    )
+    .setFooter(buildFooter("PolarisChord QAP Web"))
+    .setTimestamp(new Date());
+}
+
+function buildQapErrorEmbed(payload) {
+  const record = payload.payload && payload.payload.record ? payload.payload.record : null;
+  const fields = [
+    { name: "stage", value: String(payload.stage || "-"), inline: true },
+    { name: "error", value: truncate(String(payload.error_message || "-"), 1000), inline: false },
+  ];
+
+  if (record) {
+    const members = toArray(record.members).map((member) => {
+      const name = String(member && member.name || "-").trim() || "-";
+      const crewid = String(member && member.crewid || "-").trim() || "-";
+      return `・${name} / ${crewid}`;
+    });
+
+    fields.push(
+      { name: "日付", value: String(record.display_date || "-"), inline: true },
+      { name: "曲名", value: String(record.music_title || "-"), inline: true },
+      { name: "難易度", value: String(record.diff || "-").toUpperCase(), inline: true },
+      { name: "プレイヤー", value: splitLinesToFieldValue(members), inline: false },
+    );
+  }
+
+  return new EmbedBuilder()
+    .setTitle("❌ QAPデータ登録エラー")
+    .setColor(0xed4245)
+    .addFields(fields)
+    .setFooter(buildFooter("PolarisChord QAP Web"))
+    .setTimestamp(new Date());
+}
+
+function buildQapSummaryEmbed(payload) {
+  const results = toArray(payload.results);
+  const lines = results.map((item) => {
+    const label = String(item && item.label || "-");
+    const status = String(item && item.status || (item && item.success ? "success" : "unknown"));
+    const changed = item && typeof item.changed === "boolean" ? (item.changed ? "changed" : "no_change") : "-";
+    const fileName = String(item && item.file_name || "-");
+    return `・${label} | ${status} | ${changed} | ${fileName}`;
+  });
+
+  const hasError = results.some((item) => item && item.success === false) || Boolean(payload.error_message);
+
+  return new EmbedBuilder()
+    .setTitle(hasError ? "⚠️ QAP summary_data 更新エラー" : "📦 QAP summary_data 更新結果")
+    .setColor(hasError ? 0xed4245 : 0x5865f2)
+    .addFields(
+      { name: "結果", value: splitLinesToFieldValue(lines), inline: false },
+      { name: "エラー", value: String(payload.error_message || "-"), inline: false },
+      { name: "実行時刻", value: String(payload.executed_at || nowIso()), inline: false },
+    )
+    .setFooter(buildFooter("PolarisChord QAP Summary Updater"))
+    .setTimestamp(new Date());
+}
+
+function buildGenericEmbed(payload) {
+  return new EmbedBuilder()
+    .setTitle("🔔 通知")
+    .setColor(0x5865f2)
+    .setDescription("未定義の通知タイプです。")
+    .addFields(
+      { name: "source", value: String(payload.source || "-"), inline: true },
+      { name: "event_type", value: String(payload.event_type || "-"), inline: true },
+      { name: "payload", value: truncate(safeJson(payload), 1000), inline: false },
+    )
+    .setFooter(buildFooter("PolarisChord Notification Bot"))
+    .setTimestamp(new Date());
+}
+
+function buildEmbed(payload) {
+  const source = normalizeSource(payload.source);
+  const eventType = normalizeEventType(payload.event_type);
+
+  if (source === "score_tool" && eventType === "bookmarklet") {
+    return buildScoreBookmarkletEmbed(payload);
+  }
+  if (source === "score_tool" && eventType === "music_data") {
+    return buildScoreMusicDataEmbed(payload);
+  }
+  if (source === "score_tool" && eventType === "apdiff") {
+    return buildScoreApdiffEmbed(payload);
+  }
+  if (source === "qap_site" && eventType === "qap_save") {
+    return buildQapSaveEmbed(payload);
+  }
+  if (source === "qap_site" && eventType === "qap_update") {
+    return buildQapUpdateEmbed(payload);
+  }
+  if (source === "qap_site" && eventType === "qap_delete") {
+    return buildQapDeleteEmbed(payload);
+  }
+  if (source === "qap_site" && eventType === "qap_error") {
+    return buildQapErrorEmbed(payload);
+  }
+  if (source === "qap_site" && eventType === "qap_summary_update") {
+    return buildQapSummaryEmbed(payload);
+  }
+
+  return buildGenericEmbed(payload);
+}
+
+/* =========================================================
+ * 送信キュー
+ * ========================================================= */
+
+async function enqueueMessage(job) {
+  return new Promise((resolve, reject) => {
+    queue.push({ job, resolve, reject });
+    processQueue().catch((error) => {
+      console.error("[queue] fatal:", error);
+    });
+  });
+}
+
+async function processQueue() {
+  if (is_sending) return;
+  is_sending = true;
+
   try {
-    console.log("qap post start");
-    const response = await gasClient.post("", payload);
-    console.log("qap post success:", response.data);
+    while (queue.length > 0) {
+      const item = queue.shift();
 
-    if (response.data && response.data.ok === false) {
-      throw new Error(response.data.error || "GAS側でエラーが発生しました");
+      try {
+        const result = await item.job();
+        item.resolve(result);
+      } catch (error) {
+        item.reject(error);
+      }
+
+      await sleep(1200);
     }
-
-    await safeEditReply_(interaction, {
-      embeds: [
-        {
-          title: '✅ QAPデータ更新完了',
-          color: 0x5865F2,
-          fields: [
-            {
-              name: "日付",
-              value: dateInput,
-              inline: true,
-            },
-            {
-              name: "曲名",
-              value: song.name,
-              inline: true,
-            },
-            {
-              name: "難易度",
-              value: diff,
-              inline: true,
-            },
-            {
-              name: "プレイヤー",
-              value: [
-                `・${payload.name1} `,
-                `・${payload.name2} `,
-                `・${payload.name3} `,
-                `・${payload.name4} `,
-              ].join("\n"),
-              inline: false,
-            },
-          ],
-          footer: {
-            text: "PolarisChord QAP Web",
-          },
-          timestamp: new Date().toISOString()
-        }
-      ]
-    });
-  } catch (error) {
-    console.error("qap post error:", {
-      message: error?.message,
-      code: error?.code,
-      response_status: error?.response?.status,
-      response_data: error?.response?.data,
-    });
-
-    await safeEditReply_(interaction, buildErrorMessage_(error));
+  } finally {
+    is_sending = false;
   }
 }
 
-client.once(Events.ClientReady, async (readyClient) => {
-  console.log(`ログイン成功: ${readyClient.user.tag}`);
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
+/* =========================================================
+ * Discord送信
+ * ========================================================= */
+
+async function sendNotification(payload) {
+  const source = normalizeSource(payload.source);
+  const eventType = normalizeEventType(payload.event_type);
+  const level = String(payload.level || "").toLowerCase();
+
+  const channelId = resolveChannelId(source, eventType, level);
+  if (!channelId) {
+    throw new Error(`No channel mapping found for source=${source}, event_type=${eventType}, level=${level}`);
+  }
+
+  const channel = await client.channels.fetch(channelId);
+  if (!channel || !channel.isTextBased()) {
+    throw new Error(`Channel is not text based or not found: ${channelId}`);
+  }
+
+  const embed = buildEmbed(payload);
+  const content = payload.content ? String(payload.content) : null;
+
+  const message = await channel.send({
+    content: content || undefined,
+    embeds: [embed],
+  });
+
+  return {
+    ok: true,
+    channel_id: channelId,
+    message_id: message.id,
+  };
+}
+
+/* =========================================================
+ * API
+ * ========================================================= */
+
+app.get("/", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "polaris-notify-bot",
+    time: nowIso(),
+  });
+});
+
+app.get("/health", (_req, res) => {
+  res.json({
+    ok: true,
+    logged_in: client.isReady(),
+    bot_user: client.user ? client.user.tag : null,
+    queue_length: queue.length,
+    token_hint: maskToken(DISCORD_NOTIFY_API_TOKEN),
+    time: nowIso(),
+  });
+});
+
+app.post("/notify", async (req, res) => {
   try {
-    await ensureSongsLoaded_(true);
-  } catch (error) {
-    console.error("起動時の楽曲読み込み失敗:", error);
-  }
-});
-
-client.on(Events.InteractionCreate, async (interaction) => {
-  if (interaction.isAutocomplete()) {
-    return handleAutocomplete_(interaction);
-  }
-
-  if (!interaction.isChatInputCommand()) {
-    return;
-  }
-
-  try {
-    switch (interaction.commandName) {
-      case "qap":
-        await handleQapCommand_(interaction);
-        break;
-      default:
-        break;
+    if (!verifyBearerToken(req)) {
+      return res.status(401).json({
+        ok: false,
+        error: "Unauthorized",
+      });
     }
-  } catch (error) {
-    console.error("interaction error:", error);
 
-    const message = "エラーが発生しました";
-    if (interaction.deferred || interaction.replied) {
-      await interaction.editReply(message).catch(() => {});
-    } else {
-      await interaction.reply({ content: message, ephemeral: true }).catch(() => {});
+    const payload = req.body || {};
+    const source = normalizeSource(payload.source);
+    const eventType = normalizeEventType(payload.event_type);
+
+    if (!source) {
+      return res.status(400).json({
+        ok: false,
+        error: "source is required",
+      });
     }
+
+    if (!eventType) {
+      return res.status(400).json({
+        ok: false,
+        error: "event_type is required",
+      });
+    }
+
+    const result = await enqueueMessage(() => sendNotification(payload));
+
+    return res.json({
+      ok: true,
+      queued: true,
+      result,
+    });
+  } catch (error) {
+    console.error("[/notify] error:", error);
+    return res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
   }
 });
 
-process.on("unhandledRejection", (reason) => {
-  console.error("unhandledRejection:", reason);
-});
+/* =========================================================
+ * 起動
+ * ========================================================= */
 
-process.on("uncaughtException", (error) => {
-  console.error("uncaughtException:", error);
-});
+async function start() {
+  client.once("ready", () => {
+    console.log(`[discord] logged in as ${client.user.tag}`);
+  });
 
-client.login(CONFIG.DISCORD_TOKEN);
+  await client.login(DISCORD_BOT_TOKEN);
+
+  app.listen(Number(PORT), () => {
+    console.log(`[http] listening on :${PORT}`);
+  });
+}
+
+start().catch((error) => {
+  console.error("[startup] failed:", error);
+  process.exit(1);
+});
