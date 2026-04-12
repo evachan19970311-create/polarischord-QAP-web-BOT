@@ -10,18 +10,7 @@
   "dependencies": {
     "axios": "^1.14.0",
     "discord.js": "^14.26.0",
-    "dotenv": "^17.4.0"
-  },
-  "description": "",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/evachan19970311-create/polarischord-web-BOT.git"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "bugs": {
-    "url": "https://github.com/evachan19970311-create/polarischord-web-BOT/issues"
-  },
-  "homepage": "https://github.com/evachan19970311-create/polarischord-web-BOT#readme"
+    "dotenv": "^17.4.0",
+    "express": "^4.21.2"
+  }
 }
