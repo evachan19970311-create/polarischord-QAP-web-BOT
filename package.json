@@ -1,5 +1,5 @@
 {
-  "name": "polarischord-qap-bot",
+  "name": "polarischord-web-bot",
   "version": "1.0.0",
   "main": "index.js",
   "type": "commonjs",
@@ -15,13 +15,13 @@
   "description": "",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/evachan19970311-create/polarischord-QAP-web-BOT.git"
+    "url": "git+https://github.com/evachan19970311-create/polarischord-web-BOT.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/evachan19970311-create/polarischord-QAP-web-BOT/issues"
+    "url": "https://github.com/evachan19970311-create/polarischord-web-BOT/issues"
   },
-  "homepage": "https://github.com/evachan19970311-create/polarischord-QAP-web-BOT#readme"
+  "homepage": "https://github.com/evachan19970311-create/polarischord-web-BOT#readme"
 }
