@@ -236,7 +236,7 @@ function buildScoreBookmarkletEmbed(payload) {
         "users / user_scores",
         "user_privacy_settings",
         "update_results",
-        payload.history_path ? "user_score_snapshots" : null,
+        payload.snapshot_id || payload.history_path ? "user_score_snapshots" : null,
       ].filter(Boolean).join("\n"),
       inline: false,
     },
