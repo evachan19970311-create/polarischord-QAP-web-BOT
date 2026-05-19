@@ -22,8 +22,9 @@ const {
 
   // チャンネルID
   DISCORD_CHANNEL_SCORE_LOG,
+  DISCORD_CHANNEL_SCORE_ERROR_LOG,
   DISCORD_CHANNEL_QAP_LOG,
-  DISCORD_CHANNEL_ERROR_LOG,
+  DISCORD_CHANNEL_QAP_ERROR_LOG,
 
   // 任意: 個別に分けたい場合はこれらを使う
   DISCORD_CHANNEL_SCORE_BOOKMARKLET,
@@ -147,12 +148,11 @@ function safeJson(value) {
 function resolveChannelId(source, eventType, level) {
   /*
    * スコアツール:
-   * Supabase移行後は、通知種別ごとの細分化をやめて
-   * 通常通知 / エラー通知 の2チャンネル構成に統合する。
+   * 通常通知 / エラー通知 の2チャンネル構成
    */
   if (source === "score_tool") {
     if (level === "error") {
-      return DISCORD_CHANNEL_ERROR_LOG || null;
+      return DISCORD_CHANNEL_SCORE_ERROR_LOG || DISCORD_CHANNEL_SCORE_LOG || null;
     }
 
     return DISCORD_CHANNEL_SCORE_LOG || null;
@@ -160,24 +160,11 @@ function resolveChannelId(source, eventType, level) {
 
   /*
    * QAPサイト:
-   * 今回は既存運用を維持する。
+   * 通常通知 / エラー通知 の2チャンネル構成
    */
   if (source === "qap_site") {
     if (level === "error") {
-      return DISCORD_CHANNEL_ERROR_LOG || DISCORD_CHANNEL_QAP_LOG || null;
-    }
-
-    if (eventType === "qap_summary_update") {
-      return DISCORD_CHANNEL_QAP_SUMMARY || DISCORD_CHANNEL_QAP_LOG || null;
-    }
-
-    if (
-      eventType === "qap_save" ||
-      eventType === "qap_update" ||
-      eventType === "qap_delete" ||
-      eventType === "qap_error"
-    ) {
-      return DISCORD_CHANNEL_QAP_DOPST || DISCORD_CHANNEL_QAP_LOG || null;
+      return DISCORD_CHANNEL_QAP_ERROR_LOG || DISCORD_CHANNEL_QAP_LOG || null;
     }
 
     return DISCORD_CHANNEL_QAP_LOG || null;
@@ -185,16 +172,25 @@ function resolveChannelId(source, eventType, level) {
 
   /*
    * 不明なsource:
-   * errorならエラー通知、それ以外は通常通知へ逃がす。
+   * errorならQAP/スコアのエラー通知へ逃がす。
    */
   if (level === "error") {
-    return DISCORD_CHANNEL_ERROR_LOG || null;
+    return (
+      DISCORD_CHANNEL_QAP_ERROR_LOG ||
+      DISCORD_CHANNEL_SCORE_ERROR_LOG ||
+      DISCORD_CHANNEL_QAP_LOG ||
+      DISCORD_CHANNEL_SCORE_LOG ||
+      null
+    );
   }
 
-  return DISCORD_CHANNEL_SCORE_LOG ||
+  return (
+    DISCORD_CHANNEL_SCORE_LOG ||
     DISCORD_CHANNEL_QAP_LOG ||
-    DISCORD_CHANNEL_ERROR_LOG ||
-    null;
+    DISCORD_CHANNEL_SCORE_ERROR_LOG ||
+    DISCORD_CHANNEL_QAP_ERROR_LOG ||
+    null
+  );
 }
 
 /* =========================================================
@@ -479,6 +475,216 @@ function buildQapDeleteEmbed(payload) {
     .setTimestamp(new Date());
 }
 
+function formatQapMemberList(record) {
+  const members = toArray(record && record.members).map((member) => {
+    const index =
+      member && member.member_index != null
+        ? Number(member.member_index) + 1
+        : null;
+
+    const name =
+      String(
+        (member && (member.name || member.player_name)) || "-"
+      ).trim() || "-";
+
+    const crewid =
+      String(
+        (member && (member.crewid || member.crew_id)) || "-"
+      ).trim() || "-";
+
+    return `・${index ? index + ". " : ""}${name} / ${crewid}`;
+  });
+
+  return splitLinesToFieldValue(members, 1000);
+}
+
+function formatQapRecordSummary(record) {
+  if (!record) return "-";
+
+  return [
+    `曲名: ${record.music_title || "-"}`,
+    `難易度: ${String(record.diff || "-").toUpperCase()}`,
+    `日付: ${record.display_date || "-"}`,
+  ].join("\n");
+}
+
+function formatQapAdminActionLabel(action) {
+  switch (String(action || "")) {
+    case "qap_record_create":
+      return "QAPデータ追加";
+    case "qap_record_update":
+      return "QAPデータ編集";
+    case "qap_record_delete":
+      return "QAPデータ削除";
+    case "qap_member_crewid_fill":
+      return "CrewID補完";
+    default:
+      return String(action || "-");
+  }
+}
+
+function getQapAdminActivityStyle(action) {
+  switch (String(action || "")) {
+    case "qap_record_create":
+      return {
+        title: "✅ QAPデータ追加",
+        color: 0x57f287,
+      };
+    case "qap_record_update":
+      return {
+        title: "✏️ QAPデータ編集",
+        color: 0xfee75c,
+      };
+    case "qap_record_delete":
+      return {
+        title: "🗑️ QAPデータ削除",
+        color: 0xed4245,
+      };
+    case "qap_member_crewid_fill":
+      return {
+        title: "🔗 CrewID補完",
+        color: 0x00d4ff,
+      };
+    default:
+      return {
+        title: "🛠️ QAP管理操作",
+        color: 0x5865f2,
+      };
+  }
+}
+
+function buildQapAdminActivityEmbed(payload) {
+  const log = payload.log || {};
+  const action = String(log.action || payload.action || "");
+  const style = getQapAdminActivityStyle(action);
+
+  const beforeData = log.before_data || null;
+  const afterData = log.after_data || null;
+  const detail = log.detail || {};
+
+  const adminName = String(log.admin_display_name || "-");
+  const adminId = String(log.admin_id || "-");
+  const createdAt = log.created_at || payload.executed_at || nowIso();
+
+  const fields = [
+    {
+      name: "操作",
+      value: formatQapAdminActionLabel(action),
+      inline: true,
+    },
+    {
+      name: "管理者",
+      value: `${adminName}\n${adminId}`,
+      inline: true,
+    },
+    {
+      name: "実行日時",
+      value: formatJstDateTime(createdAt),
+      inline: false,
+    },
+  ];
+
+  if (action === "qap_record_create") {
+    fields.push(
+      {
+        name: "追加データ",
+        value: formatQapRecordSummary(afterData),
+        inline: false,
+      },
+      {
+        name: "プレイヤー",
+        value: formatQapMemberList(afterData),
+        inline: false,
+      },
+    );
+  } else if (action === "qap_record_update") {
+    fields.push(
+      {
+        name: "変更前",
+        value: formatQapRecordSummary(beforeData),
+        inline: true,
+      },
+      {
+        name: "変更後",
+        value: formatQapRecordSummary(afterData),
+        inline: true,
+      },
+      {
+        name: "変更後プレイヤー",
+        value: formatQapMemberList(afterData),
+        inline: false,
+      },
+    );
+
+    if (detail && detail.music_changed === true) {
+      fields.push({
+        name: "楽曲/難易度変更",
+        value: `${detail.old_key || "-"} → ${detail.new_key || "-"}`,
+        inline: false,
+      });
+    }
+  } else if (action === "qap_record_delete") {
+    fields.push(
+      {
+        name: "削除データ",
+        value: formatQapRecordSummary(beforeData),
+        inline: false,
+      },
+      {
+        name: "プレイヤー",
+        value: formatQapMemberList(beforeData),
+        inline: false,
+      },
+    );
+  } else if (action === "qap_member_crewid_fill") {
+    const targetNames = toArray(detail.target_names).map(
+      (name) => `・${String(name)}`,
+    );
+
+    fields.push(
+      {
+        name: "補完CrewID",
+        value: String(detail.crew_id || "-"),
+        inline: true,
+      },
+      {
+        name: "更新件数",
+        value: [
+          `メンバー: ${detail.updated_member_count ?? 0}`,
+          `QAPデータ: ${detail.updated_record_count ?? 0}`,
+        ].join("\n"),
+        inline: true,
+      },
+      {
+        name: "対象プレイヤー名",
+        value: splitLinesToFieldValue(targetNames),
+        inline: false,
+      },
+    );
+  } else {
+    fields.push({
+      name: "詳細",
+      value: truncate(safeJson(detail), 1000),
+      inline: false,
+    });
+  }
+
+  if (log.id != null) {
+    fields.push({
+      name: "log_id",
+      value: String(log.id),
+      inline: true,
+    });
+  }
+
+  return new EmbedBuilder()
+    .setTitle(style.title)
+    .setColor(style.color)
+    .addFields(...fields)
+    .setFooter(buildFooter("PolarisChord QAP Admin Activity"))
+    .setTimestamp(new Date());
+}
+
 function buildQapErrorEmbed(payload) {
   const record = payload.payload && payload.payload.record ? payload.payload.record : null;
   const fields = [
@@ -565,6 +771,9 @@ function buildEmbed(payload) {
   }
   if (source === "qap_site" && eventType === "qap_summary_update") {
     return buildQapSummaryEmbed(payload);
+  }
+  if (source === "qap_site" && eventType === "qap_admin_activity") {
+    return buildQapAdminActivityEmbed(payload);
   }
 
   return buildGenericEmbed(payload);
