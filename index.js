@@ -427,6 +427,101 @@ function buildQapSummaryEmbed(payload) {
     .setTimestamp(new Date());
 }
 
+function buildQapJacketUploadEmbed(payload) {
+  const result = payload.result || {};
+  const admin = payload.admin || {};
+
+  const uploadedCount = Number(result.uploaded_count || 0);
+  const skippedCount = Number(result.skipped_count || 0);
+  const failedCount = Number(result.failed_count || 0);
+  const overwrite = result.overwrite === true;
+
+  const uploadedItems = toArray(result.uploaded_music_ids)
+    .slice(0, 20)
+    .map((id) => `・${String(id)}`);
+
+  const failedItems = toArray(result.failed)
+    .slice(0, 10)
+    .map((item) => {
+      if (typeof item === "string") {
+        return `・${item}`;
+      }
+
+      return `・${item && item.music_id ? item.music_id : "-"}: ${
+        item && item.reason ? item.reason : "-"
+      }`;
+    });
+
+  const fields = [
+    {
+      name: "管理者",
+      value: `${admin.display_name || "-"}\n${admin.admin_id || "-"}`,
+      inline: true,
+    },
+    {
+      name: "保存先",
+      value: [
+        `bucket: ${result.bucket || "-"}`,
+        `path: ${result.base_path || "jacket/"}`,
+      ].join("\n"),
+      inline: true,
+    },
+    {
+      name: "実行結果",
+      value: [
+        `uploaded: ${uploadedCount}`,
+        `skipped: ${skippedCount}`,
+        `failed: ${failedCount}`,
+        `overwrite: ${String(overwrite)}`,
+        `max_count: ${result.max_count ?? "-"}`,
+      ].join("\n"),
+      inline: false,
+    },
+    {
+      name: "実行時刻",
+      value: formatJstDateTime(payload.executed_at || nowIso()),
+      inline: false,
+    },
+  ];
+
+  if (uploadedItems.length > 0) {
+    fields.push({
+      name: "アップロードしたmusic_id（最大20件）",
+      value: splitLinesToFieldValue(uploadedItems, 1000),
+      inline: false,
+    });
+  }
+
+  if (failedItems.length > 0) {
+    fields.push({
+      name: "失敗（最大10件）",
+      value: splitLinesToFieldValue(failedItems, 1000),
+      inline: false,
+    });
+  }
+
+  const title =
+    failedCount > 0
+      ? "⚠️ QAPジャケット画像アップロード 一部失敗"
+      : uploadedCount > 0
+        ? "🖼️ QAPジャケット画像アップロード完了"
+        : "✅ QAPジャケット画像確認完了";
+
+  const color =
+    failedCount > 0
+      ? 0xfee75c
+      : uploadedCount > 0
+        ? 0x57f287
+        : 0x95a5a6;
+
+  return new EmbedBuilder()
+    .setTitle(title)
+    .setColor(color)
+    .addFields(...fields)
+    .setFooter(buildFooter("PolarisChord QAP Jacket Upload"))
+    .setTimestamp(new Date());
+}
+
 function buildQapUpdateEmbed(payload) {
   const beforeRecord = payload.before_record || {};
   const afterRecord = payload.after_record || {};
@@ -771,6 +866,9 @@ function buildEmbed(payload) {
   }
   if (source === "qap_site" && eventType === "qap_summary_update") {
     return buildQapSummaryEmbed(payload);
+  }
+  if (source === "qap_site" && eventType === "qap_jacket_upload") {
+    return buildQapJacketUploadEmbed(payload);
   }
   if (source === "qap_site" && eventType === "qap_admin_activity") {
     return buildQapAdminActivityEmbed(payload);
